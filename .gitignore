@@ -71,6 +71,8 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+#data files
+data/
 # PyBuilder
 .pybuilder/
 target/
@@ -208,6 +210,14 @@ tempCodeRunnerFile.py
 
 # PyPI configuration file
 .pypirc
+
+# Signature verification data and generated artifacts
+data/raw/
+data/processed/
+artifacts/
+reports/*.png
+reports/*.json
+reports/*.csv
 
 # Marimo
 marimo/_static/
