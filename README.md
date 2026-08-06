@@ -47,7 +47,13 @@ Run the baseline experiment:
 uv run sv-train
 ```
 
-This uses pretrained ConvNeXt-Tiny weights. The first run may need network access to obtain them. On this machine the installed PyTorch build currently runs on CPU even though an NVIDIA GTX 1650 is present. Before the full 30-epoch run, install a CUDA-compatible PyTorch build through a documented `uv` source and confirm that `torch.cuda.is_available()` is `True`.
+This uses pretrained ConvNeXt-Tiny weights. The first run may need network access to obtain them. The project pins the official PyTorch 2.7.1 CUDA 12.8 build for Windows/Linux through `uv`; it has been verified on this machine's NVIDIA GTX 1650.
+
+Verify CUDA before a long run:
+
+```powershell
+uv run python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+```
 
 After training, calibrate on validation writers and evaluate test writers:
 

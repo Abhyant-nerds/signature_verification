@@ -215,6 +215,7 @@ tempCodeRunnerFile.py
 data/raw/
 data/processed/
 artifacts/
+my_tests/
 reports/*.png
 reports/*.json
 reports/*.csv

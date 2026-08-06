@@ -40,11 +40,23 @@ def _load_grayscale(source: str | Path | np.ndarray) -> np.ndarray:
 
 def assess_quality(image: np.ndarray, cfg: PreprocessConfig) -> QualityResult:
     height, width = image.shape
-    contrast = float(np.percentile(image, 95) - np.percentile(image, 5))
+    # Signatures often cover less than 5% of a white page, so 5th/95th percentiles
+    # can incorrectly call a clearly readable sparse signature low-contrast.
+    contrast = float(np.percentile(image, 99) - np.percentile(image, 1))
     threshold = max(0, min(254, int(np.percentile(image, 50) - 20)))
     ink_fraction = float(np.mean(image < threshold))
     blur = float(cv2.Laplacian(image, cv2.CV_64F).var())
-    border = np.concatenate((image[0], image[-1], image[:, 0], image[:, -1]))
+    # Ignore the outer scanner/crop frame. Several legitimate datasets include a
+    # one-pixel grey border that is unrelated to signature clipping.
+    inset = min(3, max(0, min(height, width) // 10))
+    border = np.concatenate(
+        (
+            image[inset, inset:-inset],
+            image[-inset - 1, inset:-inset],
+            image[inset:-inset, inset],
+            image[inset:-inset, -inset - 1],
+        )
+    ) if inset else np.concatenate((image[0], image[-1], image[:, 0], image[:, -1]))
     border_ink_fraction = float(np.mean(border < threshold))
     reasons: list[str] = []
     if min(height, width) < cfg.min_dimension:

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from signature_verification.config import load_config
 from signature_verification.datasets import audit_cedar, build_cedar_metadata
@@ -68,10 +70,24 @@ def evaluate_main(argv: list[str] | None = None) -> None:
     checkpoint_data = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if checkpoint_data.get("run_type") != "baseline":
         raise SystemExit("Refusing to evaluate a smoke checkpoint as the final baseline.")
+    checkpoint_epoch = checkpoint_data.get("epoch", "unknown")
+    tqdm.write(f"Loading best baseline checkpoint from epoch {checkpoint_epoch}: {checkpoint}")
     model, preprocess_cfg, device = load_model(checkpoint)
+    tqdm.write(f"Evaluation device: {device}")
+    tqdm.write(f"Pairs per split: {args.pairs:,}")
     output: dict = {}
     threshold = None
-    for offset, split in enumerate(("val", "test")):
+    evaluation_started = time.perf_counter()
+    split_progress = tqdm(
+        enumerate(("val", "test")),
+        total=2,
+        desc="Evaluation",
+        unit="split",
+        dynamic_ncols=True,
+    )
+    for offset, split in split_progress:
+        split_started = time.perf_counter()
+        split_progress.set_postfix(stage=f"generate {split} pairs")
         pairs = generate_pairs(
             metadata[metadata.split == split], args.pairs,
             config["data"]["positive_fraction"],
@@ -83,15 +99,38 @@ def evaluate_main(argv: list[str] | None = None) -> None:
             batch_size=config["training"]["batch_size"], shuffle=False,
             num_workers=config["training"]["num_workers"],
         )
-        scores, labels, kinds = score_loader(model, loader, device)
+        split_progress.set_postfix(stage=f"score {split}")
+        scores, labels, kinds = score_loader(
+            model,
+            loader,
+            device,
+            description=f"Score {split} ({len(pairs):,} pairs)",
+        )
         if split == "val":
+            split_progress.set_postfix(stage="calibrate threshold")
             calibration = calibrate_threshold(labels, scores)
             threshold = calibration["threshold"]
             output["calibration"] = calibration
+            tqdm.write(
+                "Validation calibration — "
+                f"threshold={threshold:.6f}, EER={calibration['eer']:.4f}, "
+                f"FAR={calibration['far']:.4f}, FRR={calibration['frr']:.4f}"
+            )
         output[split] = evaluate_scores(labels, scores, threshold, kinds)
+        output[split]["elapsed_seconds"] = time.perf_counter() - split_started
+        metrics = output[split]
+        tqdm.write(
+            f"{split.title()} complete — FAR={metrics['far']:.4f}, "
+            f"FRR={metrics['frr']:.4f}, GAR={metrics['gar']:.4f}, "
+            f"ROC-AUC={metrics['roc_auc']:.4f}, "
+            f"time={metrics['elapsed_seconds']:.1f}s"
+        )
+    output["elapsed_seconds"] = time.perf_counter() - evaluation_started
     artifact_dir = Path(config["paths"]["artifacts"])
     _write_json(output, artifact_dir / "evaluation.json")
     _write_json({"threshold": threshold, "method": "validation_eer"}, artifact_dir / "thresholds.json")
+    tqdm.write(f"Evaluation artifacts saved to: {artifact_dir.resolve()}")
+    tqdm.write(f"Total evaluation time: {output['elapsed_seconds']:.1f}s")
     print(json.dumps(output, indent=2))
 
 

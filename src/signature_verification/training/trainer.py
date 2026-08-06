@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from signature_verification.losses import ContrastiveLoss
 from signature_verification.models import SiameseNetwork
@@ -30,10 +31,20 @@ def _preprocess_config(config: dict) -> PreprocessConfig:
 
 
 @torch.no_grad()
-def score_loader(model, loader, device) -> tuple[np.ndarray, np.ndarray, list[str]]:
+def score_loader(
+    model, loader, device, description: str | None = None
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
     model.eval()
     scores, labels, kinds = [], [], []
-    for left, right, label, kind in loader:
+    batches = tqdm(
+        loader,
+        desc=description,
+        unit="batch",
+        leave=False,
+        dynamic_ncols=True,
+        disable=description is None,
+    )
+    for left, right, label, kind in batches:
         left, right = left.to(device), right.to(device)
         first, second = model(left, right)
         scores.extend(F.cosine_similarity(first, second).cpu().numpy().tolist())
@@ -89,10 +100,20 @@ def train_experiment(
     scaler = torch.amp.GradScaler("cuda", enabled=training["mixed_precision"] and device.type == "cuda")
     history, best_loss, stale = [], float("inf"), 0
     started = time.perf_counter()
-    for epoch in range(1, epochs + 1):
+    epoch_progress = tqdm(
+        range(1, epochs + 1), desc="Training", unit="epoch", dynamic_ncols=True
+    )
+    for epoch in epoch_progress:
         model.train()
         losses = []
-        for left, right, label, _ in train_loader:
+        train_progress = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch}/{epochs}",
+            unit="batch",
+            leave=False,
+            dynamic_ncols=True,
+        )
+        for left, right, label, _ in train_progress:
             left, right, label = left.to(device), right.to(device), label.to(device)
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=scaler.is_enabled()):
@@ -104,7 +125,17 @@ def train_experiment(
             scaler.step(optimizer)
             scaler.update()
             losses.append(float(loss.detach().cpu()))
-        scores, labels, _ = score_loader(model, val_loader, device)
+            progress_values = {
+                "loss": f"{losses[-1]:.4f}",
+                "avg": f"{np.mean(losses):.4f}",
+                "lr": f"{optimizer.param_groups[0]['lr']:.1e}",
+            }
+            if device.type == "cuda":
+                progress_values["gpu"] = f"{torch.cuda.memory_allocated() / 1024**2:.0f}MiB"
+            train_progress.set_postfix(progress_values)
+        scores, labels, _ = score_loader(
+            model, val_loader, device, description=f"Validate {epoch}/{epochs}"
+        )
         distances = 1.0 - scores
         val_loss = float(np.mean(0.5 * (
             labels * distances**2 + (1 - labels) * np.maximum(0, training["margin"] - distances)**2
@@ -122,8 +153,12 @@ def train_experiment(
             torch.save(checkpoint, artifact_dir / "best.pt")
         else:
             stale += 1
-            if stale >= training["patience"]:
-                break
+        epoch_progress.set_postfix(
+            train=f"{row['train_loss']:.4f}", val=f"{val_loss:.4f}", best=f"{best_loss:.4f}"
+        )
+        if stale >= training["patience"]:
+            epoch_progress.set_description("Early stopping")
+            break
     result = {
         "device": str(device), "epochs_completed": len(history), "best_val_loss": best_loss,
         "elapsed_seconds": time.perf_counter() - started, "history": history,
